@@ -24,6 +24,7 @@ import com.amazonaws.athena.connector.lambda.domain.predicate.Constraints;
 import com.amazonaws.athena.connectors.jdbc.manager.FederationExpressionParser;
 import com.amazonaws.athena.connectors.jdbc.manager.JdbcSplitQueryBuilder;
 import com.google.common.base.Strings;
+import org.apache.calcite.sql.dialect.OracleSqlDialect;
 
 import java.util.Collections;
 import java.util.List;
@@ -77,5 +78,20 @@ public class OracleQueryStringBuilder
     protected String appendLimitOffset(Split split, Constraints constraints)
     {
         return String.format(" FETCH FIRST %d ROWS ONLY ", constraints.getLimit());
+    }
+
+    @Override
+    public org.apache.calcite.sql.SqlDialect getSqlDialect()
+    {
+        return OracleSqlDialect.DEFAULT;
+    }
+
+    @Override
+    public String appendLimitOffsetWithValue(long limit, long offset)
+    {
+        if (offset > 0) {
+            return String.format(" OFFSET %d ROWS FETCH FIRST %d ROWS ONLY", offset, limit);
+        }
+        return String.format(" FETCH FIRST %d ROWS ONLY", limit);
     }
 }
