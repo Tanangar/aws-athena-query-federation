@@ -208,7 +208,7 @@ public final class SubstraitFunctionParser
                 return Pair.of(literal.getDate(), arrowType);
             case DECIMAL:
                 arrowType = new ArrowType.Decimal(38, 10, 128);
-                return Pair.of(literal.getDecimal()., arrowType);
+                return Pair.of(literal.getDecimal().getValue(), arrowType);
             case VAR_CHAR:
                 arrowType = new ArrowType.Utf8();
                 return Pair.of(literal.getVarChar().getValue(), arrowType);
@@ -269,8 +269,19 @@ public final class SubstraitFunctionParser
     /**
      * Helper class to hold scalar function information.
      */
-    private record ScalarFunctionInfo(String functionName, List<FunctionArgument> arguments)
+    private static class ScalarFunctionInfo
     {
+        private final String functionName;
+        private final List<FunctionArgument> arguments;
+        
+        public ScalarFunctionInfo(String functionName, List<FunctionArgument> arguments)
+        {
+            this.functionName = functionName;
+            this.arguments = arguments;
+        }
+        
+        public String functionName() { return functionName; }
+        public List<FunctionArgument> arguments() { return arguments; }
     }
 
     /**

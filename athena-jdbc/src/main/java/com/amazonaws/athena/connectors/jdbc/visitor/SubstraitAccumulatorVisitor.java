@@ -44,12 +44,16 @@ public class SubstraitAccumulatorVisitor extends SqlShuttle
     @Override
     public SqlNode visit(SqlLiteral literal)
     {
-        if (literal.getValue() instanceof NlsString) {
-            accumulator.add(new SubstraitTypeAndValue(literal.getTypeName(), ((NlsString) literal.getValue()).getValue()));
-        }
-        else {
-            accumulator.add(new SubstraitTypeAndValue(literal.getTypeName(), literal.getValue()));
-        }
-        return new SqlDynamicParam(0, literal.getParserPosition());
+        // Don't accumulate literal values - they're already in the SQL as literals
+        // Only accumulate dynamic parameters that need to be set on PreparedStatement
+        return literal;
+    }
+
+    @Override
+    public SqlNode visit(SqlDynamicParam param)
+    {
+        // This is where we should accumulate actual dynamic parameters
+        // But for now, just return the param as-is since Substrait typically uses literals
+        return param;
     }
 }

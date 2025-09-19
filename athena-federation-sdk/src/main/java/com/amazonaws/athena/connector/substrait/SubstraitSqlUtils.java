@@ -27,6 +27,7 @@ import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.rel2sql.RelToSqlConverter;
 import org.apache.calcite.sql.SqlDialect;
 import org.apache.calcite.sql.SqlNode;
+import io.substrait.isthmus.TypeConverter;
 import org.apache.calcite.sql.type.SqlTypeFactoryImpl;
 
 import java.io.IOException;
@@ -39,6 +40,32 @@ public final class SubstraitSqlUtils
 {
     private SubstraitSqlUtils()
     {
+    }
+
+    public static SqlNode deserializeSubstraitPlan(String planString, SqlDialect sqlDialect, String schemaName, String tableName, org.apache.arrow.vector.types.pojo.Schema tableSchema)
+    {
+        try {
+            ProtoPlanConverter protoPlanConverter = new ProtoPlanConverter();
+            
+            CustomSubstraitToCalcite substraitToCalcite = new CustomSubstraitToCalcite(
+                    SimpleExtension.loadDefaults(),
+                    new SqlTypeFactoryImpl(sqlDialect.getTypeSystem()),
+                    TypeConverter.DEFAULT,
+                    tableName,
+                    tableSchema
+            );
+
+            byte[] planBytes = Base64.getDecoder().decode(planString);
+            Plan substraitPlan = Plan.parseFrom(planBytes);
+
+            io.substrait.plan.Plan root = protoPlanConverter.from(substraitPlan);
+            RelNode node = substraitToCalcite.convert(root.getRoots().get(0).getInput());
+            RelToSqlConverter converter = new RelToSqlConverter(sqlDialect);
+            return converter.visitRoot(node).asStatement();
+        }
+        catch (Exception e) {
+            throw new RuntimeException("Failed to parse Substrait plan", e);
+        }
     }
 
     public static SqlNode deserializeSubstraitPlan(String planString, SqlDialect sqlDialect)

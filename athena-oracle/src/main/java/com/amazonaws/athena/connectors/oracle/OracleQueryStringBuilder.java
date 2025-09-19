@@ -24,6 +24,7 @@ import com.amazonaws.athena.connector.lambda.domain.predicate.Constraints;
 import com.amazonaws.athena.connectors.jdbc.manager.FederationExpressionParser;
 import com.amazonaws.athena.connectors.jdbc.manager.JdbcSplitQueryBuilder;
 import com.google.common.base.Strings;
+import org.apache.calcite.sql.SqlDialect;
 import org.apache.calcite.sql.dialect.OracleSqlDialect;
 
 import java.util.Collections;
@@ -81,17 +82,17 @@ public class OracleQueryStringBuilder
     }
 
     @Override
-    public org.apache.calcite.sql.SqlDialect getSqlDialect()
+    protected SqlDialect getSqlDialect()
     {
         return OracleSqlDialect.DEFAULT;
     }
 
     @Override
-    public String appendLimitOffsetWithValue(long limit, long offset)
+    protected String appendLimitOffsetWithValue(String limit, String offset)
     {
-        if (offset > 0) {
-            return String.format(" OFFSET %d ROWS FETCH FIRST %d ROWS ONLY", offset, limit);
+        if (offset != null && !offset.equals("0")) {
+            return String.format(" OFFSET %s ROWS FETCH FIRST %s ROWS ONLY", offset, limit);
         }
-        return String.format(" FETCH FIRST %d ROWS ONLY", limit);
+        return String.format(" FETCH FIRST %s ROWS ONLY", limit);
     }
 }

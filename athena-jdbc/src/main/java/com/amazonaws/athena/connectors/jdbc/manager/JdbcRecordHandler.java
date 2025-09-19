@@ -58,6 +58,7 @@ import com.amazonaws.athena.connectors.jdbc.qpt.JdbcQueryPassthrough;
 import org.apache.arrow.util.VisibleForTesting;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.holders.NullableBigIntHolder;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.arrow.vector.holders.NullableBitHolder;
 import org.apache.arrow.vector.holders.NullableDateDayHolder;
 import org.apache.arrow.vector.holders.NullableDateMilliHolder;
@@ -151,43 +152,119 @@ public abstract class JdbcRecordHandler
     public void readWithConstraint(BlockSpiller blockSpiller, ReadRecordsRequest readRecordsRequest, QueryStatusChecker queryStatusChecker)
             throws Exception
     {
+        LOGGER.info("=== JDBC RECORD HANDLER EXECUTION START ===");
         LOGGER.info("{}: Catalog: {}, table {}, splits {}", readRecordsRequest.getQueryId(), readRecordsRequest.getCatalogName(), readRecordsRequest.getTableName(),
                 readRecordsRequest.getSplit().getProperties());
+        LOGGER.info("Request schema fields: {}", readRecordsRequest.getSchema().getFields().size());
+        LOGGER.info("Constraints summary: {}", readRecordsRequest.getConstraints().getSummary());
+        LOGGER.info("Has Substrait query plan: {}", readRecordsRequest.getConstraints().getQueryPlan() != null);
+        
+        long startTime = System.currentTimeMillis();
+        
         try (Connection connection = this.jdbcConnectionFactory.getConnection(getCredentialProvider())) {
             String databaseProductName = connection.getMetaData().getDatabaseProductName();
+            LOGGER.info("Database product: {}", databaseProductName);
 
             // clickhouse does not support disabling auto-commit
             if (!CLICKHOUSE_DB.equalsIgnoreCase(databaseProductName)) {
                 connection.setAutoCommit(false); // For consistency. This is needed to be false to enable streaming for some database types.
+                LOGGER.info("Auto-commit disabled for streaming");
             }
 
             enableCaseSensitivelyLookUpSession(connection); // For certain connectors, we require to apply session config first to enable case
 
+            long queryBuildStart = System.currentTimeMillis();
             try (PreparedStatement preparedStatement = buildSplitSql(connection, readRecordsRequest.getCatalogName(), readRecordsRequest.getTableName(),
                     readRecordsRequest.getSchema(), readRecordsRequest.getConstraints(), readRecordsRequest.getSplit());
                     ResultSet resultSet = preparedStatement.executeQuery()) {
+                
+                long queryBuildTime = System.currentTimeMillis() - queryBuildStart;
+                LOGGER.info("Query build and execution time: {} ms", queryBuildTime);
+                
                 Map<String, String> partitionValues = readRecordsRequest.getSplit().getProperties();
+                LOGGER.info("Partition values: {}", partitionValues);
+
+                // Get the actual columns available in the ResultSet
+                java.sql.ResultSetMetaData metaData = resultSet.getMetaData();
+                int columnCount = metaData.getColumnCount();
+                java.util.Set<String> availableColumns = new java.util.HashSet<>();
+                java.util.Map<String, String> columnNameMapping = new java.util.HashMap<>();
+                
+                LOGGER.info("=== RESULTSET METADATA ANALYSIS ===");
+                LOGGER.info("Total columns in ResultSet: {}", columnCount);
+                
+                for (int i = 1; i <= columnCount; i++) {
+                    String columnName = metaData.getColumnName(i);
+                    String columnLabel = metaData.getColumnLabel(i);
+                    String lowerColumnName = columnName.toLowerCase();
+                    
+                    availableColumns.add(lowerColumnName);
+                    columnNameMapping.put(lowerColumnName, columnName);
+                    
+                    LOGGER.info("ResultSet column {}: name='{}', label='{}', lowercase='{}'", 
+                        i, columnName, columnLabel, lowerColumnName);
+                }
+                
+                LOGGER.info("Available columns set: {}", availableColumns);
+                LOGGER.info("Column name mapping: {}", columnNameMapping);
 
                 GeneratedRowWriter.RowWriterBuilder rowWriterBuilder = GeneratedRowWriter.newBuilder(readRecordsRequest.getConstraints());
+                
+                LOGGER.info("=== FIELD VALIDATION AND EXTRACTOR BUILDING ===");
+                LOGGER.info("Schema has {} fields to process", readRecordsRequest.getSchema().getFields().size());
+                
+                // Build extractors for all fields, using null extractors for missing ones
                 for (Field next : readRecordsRequest.getSchema().getFields()) {
-                    if (next.getType() instanceof ArrowType.List) {
-                        rowWriterBuilder.withFieldWriterFactory(next.getName(), makeFactory(next));
-                    }
-                    else {
+                    String fieldName = next.getName();
+                    String lowerFieldName = fieldName.toLowerCase();
+                    LOGGER.info("Processing field: '{}' (lowercase: '{}'), checking if available...", fieldName, lowerFieldName);
+                    
+                    if (availableColumns.contains(lowerFieldName)) {
+                        String actualColumnName = columnNameMapping.get(lowerFieldName);
+                        LOGGER.info("✓ Building extractor for available field: '{}' using actual column name: '{}'", fieldName, actualColumnName);
+                        if (next.getType() instanceof ArrowType.List) {
+                            rowWriterBuilder.withFieldWriterFactory(next.getName(), makeFactory(next));
+                        }
+                        else {
+                            rowWriterBuilder.withExtractor(next.getName(), makeExtractor(next, resultSet, partitionValues, actualColumnName));
+                        }
+                    } else if (lowerFieldName.equals("partition_name") || lowerFieldName.startsWith("partition_")) {
+                        // Add synthetic extractor for partition fields using partition values
+                        LOGGER.info("✓ Adding synthetic extractor for partition field: '{}'", fieldName);
                         rowWriterBuilder.withExtractor(next.getName(), makeExtractor(next, resultSet, partitionValues));
+                    } else {
+                        // Add null extractor for missing fields
+                        LOGGER.info("✓ Adding null extractor for missing field: '{}'", fieldName);
+                        rowWriterBuilder.withExtractor(next.getName(), makeNullExtractor(next));
                     }
                 }
 
                 GeneratedRowWriter rowWriter = rowWriterBuilder.build();
                 int rowsReturnedFromDatabase = 0;
+                long dataProcessingStart = System.currentTimeMillis();
+                
                 while (resultSet.next()) {
                     if (!queryStatusChecker.isQueryRunning()) {
+                        LOGGER.info("Query cancelled by status checker after {} rows", rowsReturnedFromDatabase);
                         return;
                     }
                     blockSpiller.writeRows((Block block, int rowNum) -> rowWriter.writeRow(block, rowNum, resultSet) ? 1 : 0);
                     rowsReturnedFromDatabase++;
+                    
+                    // Log progress every 10000 rows
+                    if (rowsReturnedFromDatabase % 10000 == 0) {
+                        LOGGER.info("Processed {} rows so far", rowsReturnedFromDatabase);
+                    }
                 }
+                
+                long dataProcessingTime = System.currentTimeMillis() - dataProcessingStart;
+                long totalTime = System.currentTimeMillis() - startTime;
+                
+                LOGGER.info("=== JDBC RECORD HANDLER EXECUTION COMPLETE ===");
                 LOGGER.info("{} rows returned by database.", rowsReturnedFromDatabase);
+                LOGGER.info("Data processing time: {} ms", dataProcessingTime);
+                LOGGER.info("Total execution time: {} ms", totalTime);
+                LOGGER.info("Average rows per second: {}", rowsReturnedFromDatabase > 0 ? (rowsReturnedFromDatabase * 1000.0 / totalTime) : 0);
 
                 // clickhouse does not support commit/rollback, so skip commit() for clickhouse
                 if (!CLICKHOUSE_DB.equalsIgnoreCase(databaseProductName)) {
@@ -225,6 +302,156 @@ public abstract class JdbcRecordHandler
     protected boolean disableCaseSensitivelyLookUpSession(Connection connection)
     {
         return false;
+    }
+
+    /**
+     * Creates a null extractor for missing fields.
+     */
+    @VisibleForTesting
+    protected Extractor makeNullExtractor(Field field)
+    {
+        Types.MinorType fieldType = Types.getMinorTypeForArrowType(field.getType());
+
+        switch (fieldType) {
+            case BIT:
+                return (BitExtractor) (Object context, NullableBitHolder dst) -> dst.isSet = 0;
+            case TINYINT:
+                return (TinyIntExtractor) (Object context, NullableTinyIntHolder dst) -> dst.isSet = 0;
+            case SMALLINT:
+                return (SmallIntExtractor) (Object context, NullableSmallIntHolder dst) -> dst.isSet = 0;
+            case INT:
+                return (IntExtractor) (Object context, NullableIntHolder dst) -> dst.isSet = 0;
+            case BIGINT:
+                return (BigIntExtractor) (Object context, NullableBigIntHolder dst) -> dst.isSet = 0;
+            case FLOAT4:
+                return (Float4Extractor) (Object context, NullableFloat4Holder dst) -> dst.isSet = 0;
+            case FLOAT8:
+                return (Float8Extractor) (Object context, NullableFloat8Holder dst) -> dst.isSet = 0;
+            case DECIMAL:
+                return (DecimalExtractor) (Object context, NullableDecimalHolder dst) -> dst.isSet = 0;
+            case DATEDAY:
+                return (DateDayExtractor) (Object context, NullableDateDayHolder dst) -> dst.isSet = 0;
+            case DATEMILLI:
+                return (DateMilliExtractor) (Object context, NullableDateMilliHolder dst) -> dst.isSet = 0;
+            case VARCHAR:
+                return (VarCharExtractor) (Object context, NullableVarCharHolder dst) -> dst.isSet = 0;
+            case VARBINARY:
+                return (VarBinaryExtractor) (Object context, NullableVarBinaryHolder dst) -> dst.isSet = 0;
+            default:
+                throw new AthenaConnectorException("Unhandled type " + fieldType,
+                        ErrorDetails.builder().errorCode(FederationSourceErrorCode.OPERATION_NOT_SUPPORTED_EXCEPTION.toString()).build());
+        }
+    }
+
+    /**
+     * Creates an Extractor for the given field using the specified column name for ResultSet access.
+     */
+    @VisibleForTesting
+    protected Extractor makeExtractor(Field field, ResultSet resultSet, Map<String, String> partitionValues, String actualColumnName)
+    {
+        Types.MinorType fieldType = Types.getMinorTypeForArrowType(field.getType());
+        final String fieldName = field.getName();
+
+        if (partitionValues.containsKey(fieldName)) {
+            return (VarCharExtractor) (Object context, NullableVarCharHolder dst) ->
+            {
+                dst.isSet = 1;
+                dst.value = partitionValues.get(fieldName);
+            };
+        }
+
+        switch (fieldType) {
+            case BIT:
+                return (BitExtractor) (Object context, NullableBitHolder dst) ->
+                {
+                    boolean value = resultSet.getBoolean(actualColumnName);
+                    dst.value = value ? 1 : 0;
+                    dst.isSet = resultSet.wasNull() ? 0 : 1;
+                };
+            case TINYINT:
+                return (TinyIntExtractor) (Object context, NullableTinyIntHolder dst) ->
+                {
+                    dst.value = resultSet.getByte(actualColumnName);
+                    dst.isSet = resultSet.wasNull() ? 0 : 1;
+                };
+            case SMALLINT:
+                return (SmallIntExtractor) (Object context, NullableSmallIntHolder dst) ->
+                {
+                    dst.value = resultSet.getShort(actualColumnName);
+                    dst.isSet = resultSet.wasNull() ? 0 : 1;
+                };
+            case INT:
+                return (IntExtractor) (Object context, NullableIntHolder dst) ->
+                {
+                    dst.value = resultSet.getInt(actualColumnName);
+                    dst.isSet = resultSet.wasNull() ? 0 : 1;
+                };
+            case BIGINT:
+                return (BigIntExtractor) (Object context, NullableBigIntHolder dst) ->
+                {
+                    dst.value = resultSet.getLong(actualColumnName);
+                    dst.isSet = resultSet.wasNull() ? 0 : 1;
+                };
+            case FLOAT4:
+                return (Float4Extractor) (Object context, NullableFloat4Holder dst) ->
+                {
+                    dst.value = resultSet.getFloat(actualColumnName);
+                    dst.isSet = resultSet.wasNull() ? 0 : 1;
+                };
+            case FLOAT8:
+                return (Float8Extractor) (Object context, NullableFloat8Holder dst) ->
+                {
+                    try {
+                        dst.value = resultSet.getDouble(actualColumnName);
+                    }
+                    catch (java.sql.SQLException ex) {
+                        // We need to use Double.parseDouble()
+                        // replaceAll() use to strip commas "$25,000.00"
+                        dst.value = Double.parseDouble(resultSet.getString(actualColumnName).replaceAll(",", "").replaceAll("\\$", ""));
+                    }
+                    dst.isSet = resultSet.wasNull() ? 0 : 1;
+                };
+            case DECIMAL:
+                return (DecimalExtractor) (Object context, NullableDecimalHolder dst) ->
+                {
+                    dst.value = resultSet.getBigDecimal(actualColumnName);
+                    dst.isSet = resultSet.wasNull() ? 0 : 1;
+                };
+            case DATEDAY:
+                return (DateDayExtractor) (Object context, NullableDateDayHolder dst) ->
+                {
+                    //Issue fix for getting different date (offset by 1) for any dates prior to 1/1/1970.
+                    if (resultSet.getDate(actualColumnName) != null) {
+                        dst.value = (int) LocalDate.parse(resultSet.getDate(actualColumnName).toString()).toEpochDay();
+                    }
+                    dst.isSet = resultSet.wasNull() ? 0 : 1;
+                };
+            case DATEMILLI:
+                return (DateMilliExtractor) (Object context, NullableDateMilliHolder dst) ->
+                {
+                    if (resultSet.getTimestamp(actualColumnName) != null) {
+                        dst.value = resultSet.getTimestamp(actualColumnName).getTime();
+                    }
+                    dst.isSet = resultSet.wasNull() ? 0 : 1;
+                };
+            case VARCHAR:
+                return (VarCharExtractor) (Object context, NullableVarCharHolder dst) ->
+                {
+                    if (null != resultSet.getString(actualColumnName)) {
+                        dst.value = resultSet.getString(actualColumnName);
+                    }
+                    dst.isSet = resultSet.wasNull() ? 0 : 1;
+                };
+            case VARBINARY:
+                return (VarBinaryExtractor) (Object context, NullableVarBinaryHolder dst) ->
+                {
+                    dst.value = resultSet.getBytes(actualColumnName);
+                    dst.isSet = resultSet.wasNull() ? 0 : 1;
+                };
+            default:
+                throw new AthenaConnectorException("Unhandled type " + fieldType,
+                        ErrorDetails.builder().errorCode(FederationSourceErrorCode.OPERATION_NOT_SUPPORTED_EXCEPTION.toString()).build());
+        }
     }
 
     /**
