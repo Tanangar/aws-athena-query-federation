@@ -42,11 +42,14 @@ public final class SubstraitSqlUtils
     {
     }
 
+    /**
+     * Deserializes a Substrait plan with schema-aware processing.
+     * Uses CustomSubstraitToCalcite to resolve table and column references.
+     */
     public static SqlNode deserializeSubstraitPlan(String planString, SqlDialect sqlDialect, String schemaName, String tableName, org.apache.arrow.vector.types.pojo.Schema tableSchema)
     {
         try {
-            ProtoPlanConverter protoPlanConverter = new ProtoPlanConverter();
-            
+            // Create schema-aware converter for table/column resolution
             CustomSubstraitToCalcite substraitToCalcite = new CustomSubstraitToCalcite(
                     SimpleExtension.loadDefaults(),
                     new SqlTypeFactoryImpl(sqlDialect.getTypeSystem()),
@@ -54,39 +57,52 @@ public final class SubstraitSqlUtils
                     tableName,
                     tableSchema
             );
-
-            byte[] planBytes = Base64.getDecoder().decode(planString);
-            Plan substraitPlan = Plan.parseFrom(planBytes);
-
-            io.substrait.plan.Plan root = protoPlanConverter.from(substraitPlan);
-            RelNode node = substraitToCalcite.convert(root.getRoots().get(0).getInput());
-            RelToSqlConverter converter = new RelToSqlConverter(sqlDialect);
-            return converter.visitRoot(node).asStatement();
+            
+            return convertSubstraitPlanToSql(planString, sqlDialect, substraitToCalcite);
         }
         catch (Exception e) {
-            throw new RuntimeException("Failed to parse Substrait plan", e);
+            throw new RuntimeException("Failed to parse Substrait plan with schema: " + e.getMessage(), e);
         }
     }
 
+    /**
+     * Deserializes a Substrait plan with standard processing.
+     * Uses standard SubstraitToCalcite converter.
+     */
     public static SqlNode deserializeSubstraitPlan(String planString, SqlDialect sqlDialect)
     {
         try {
-            ProtoPlanConverter protoPlanConverter = new ProtoPlanConverter();
+            // Create standard converter
             SubstraitToCalcite substraitToCalcite = new SubstraitToCalcite(
                     SimpleExtension.loadDefaults(),
                     new SqlTypeFactoryImpl(sqlDialect.getTypeSystem())
             );
-
-            byte[] planBytes = Base64.getDecoder().decode(planString);
-            Plan substraitPlan = Plan.parseFrom(planBytes);
-
-            io.substrait.plan.Plan root = protoPlanConverter.from(substraitPlan);
-            RelNode node = substraitToCalcite.convert(root.getRoots().get(0).getInput());
-            RelToSqlConverter converter = new RelToSqlConverter(sqlDialect);
-            return converter.visitRoot(node).asStatement();
+            
+            return convertSubstraitPlanToSql(planString, sqlDialect, substraitToCalcite);
         }
-        catch (IOException e) {
-            throw new RuntimeException("Failed to parse Substrait plan", e);
+        catch (Exception e) {
+            throw new RuntimeException("Failed to parse Substrait plan: " + e.getMessage(), e);
         }
+    }
+    
+    /**
+     * Common logic for converting Substrait plan to SQL using the provided converter.
+     * Handles the core deserialization steps that are identical for both methods.
+     */
+    private static SqlNode convertSubstraitPlanToSql(String planString, SqlDialect sqlDialect, SubstraitToCalcite substraitToCalcite) 
+            throws Exception
+    {
+        // Step 1: Convert protobuf plan to Substrait plan object
+        ProtoPlanConverter protoPlanConverter = new ProtoPlanConverter();
+        byte[] planBytes = Base64.getDecoder().decode(planString);
+        Plan substraitPlan = Plan.parseFrom(planBytes);
+
+        // Step 2: Convert Substrait plan to Calcite RelNode
+        io.substrait.plan.Plan root = protoPlanConverter.from(substraitPlan);
+        RelNode node = substraitToCalcite.convert(root.getRoots().get(0).getInput());
+        
+        // Step 3: Convert Calcite RelNode to SQL
+        RelToSqlConverter converter = new RelToSqlConverter(sqlDialect);
+        return converter.visitRoot(node).asStatement();
     }
 }

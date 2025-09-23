@@ -269,19 +269,8 @@ public final class SubstraitFunctionParser
     /**
      * Helper class to hold scalar function information.
      */
-    private static class ScalarFunctionInfo
+    private record ScalarFunctionInfo(String functionName, List<FunctionArgument> arguments)
     {
-        private final String functionName;
-        private final List<FunctionArgument> arguments;
-        
-        public ScalarFunctionInfo(String functionName, List<FunctionArgument> arguments)
-        {
-            this.functionName = functionName;
-            this.arguments = arguments;
-        }
-        
-        public String functionName() { return functionName; }
-        public List<FunctionArgument> arguments() { return arguments; }
     }
 
     /**

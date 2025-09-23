@@ -152,18 +152,18 @@ public abstract class JdbcRecordHandler
     public void readWithConstraint(BlockSpiller blockSpiller, ReadRecordsRequest readRecordsRequest, QueryStatusChecker queryStatusChecker)
             throws Exception
     {
-        LOGGER.info("=== JDBC RECORD HANDLER EXECUTION START ===");
-        LOGGER.info("{}: Catalog: {}, table {}, splits {}", readRecordsRequest.getQueryId(), readRecordsRequest.getCatalogName(), readRecordsRequest.getTableName(),
-                readRecordsRequest.getSplit().getProperties());
-        LOGGER.info("Request schema fields: {}", readRecordsRequest.getSchema().getFields().size());
-        LOGGER.info("Constraints summary: {}", readRecordsRequest.getConstraints().getSummary());
-        LOGGER.info("Has Substrait query plan: {}", readRecordsRequest.getConstraints().getQueryPlan() != null);
+        LOGGER.info("Processing query {} for table {}.{}", 
+            readRecordsRequest.getQueryId(), readRecordsRequest.getCatalogName(), readRecordsRequest.getTableName());
+        LOGGER.debug("Split properties: {}", readRecordsRequest.getSplit().getProperties());
+        LOGGER.debug("Schema fields: {}, Substrait plan: {}", 
+            readRecordsRequest.getSchema().getFields().size(), 
+            readRecordsRequest.getConstraints().getQueryPlan() != null);
         
         long startTime = System.currentTimeMillis();
         
         try (Connection connection = this.jdbcConnectionFactory.getConnection(getCredentialProvider())) {
             String databaseProductName = connection.getMetaData().getDatabaseProductName();
-            LOGGER.info("Database product: {}", databaseProductName);
+            LOGGER.debug("Database product: {}", databaseProductName);
 
             // clickhouse does not support disabling auto-commit
             if (!CLICKHOUSE_DB.equalsIgnoreCase(databaseProductName)) {
@@ -182,7 +182,7 @@ public abstract class JdbcRecordHandler
                 LOGGER.info("Query build and execution time: {} ms", queryBuildTime);
                 
                 Map<String, String> partitionValues = readRecordsRequest.getSplit().getProperties();
-                LOGGER.info("Partition values: {}", partitionValues);
+                LOGGER.debug("Partition values: {}", partitionValues);
 
                 // Get the actual columns available in the ResultSet
                 java.sql.ResultSetMetaData metaData = resultSet.getMetaData();
@@ -190,38 +190,32 @@ public abstract class JdbcRecordHandler
                 java.util.Set<String> availableColumns = new java.util.HashSet<>();
                 java.util.Map<String, String> columnNameMapping = new java.util.HashMap<>();
                 
-                LOGGER.info("=== RESULTSET METADATA ANALYSIS ===");
-                LOGGER.info("Total columns in ResultSet: {}", columnCount);
+                LOGGER.debug("Analyzing ResultSet metadata: {} columns", columnCount);
                 
                 for (int i = 1; i <= columnCount; i++) {
                     String columnName = metaData.getColumnName(i);
-                    String columnLabel = metaData.getColumnLabel(i);
                     String lowerColumnName = columnName.toLowerCase();
                     
                     availableColumns.add(lowerColumnName);
                     columnNameMapping.put(lowerColumnName, columnName);
                     
-                    LOGGER.info("ResultSet column {}: name='{}', label='{}', lowercase='{}'", 
-                        i, columnName, columnLabel, lowerColumnName);
+                    LOGGER.debug("Column {}: '{}' -> '{}'", i, columnName, lowerColumnName);
                 }
                 
-                LOGGER.info("Available columns set: {}", availableColumns);
-                LOGGER.info("Column name mapping: {}", columnNameMapping);
+                LOGGER.debug("Available columns: {}", availableColumns);
 
                 GeneratedRowWriter.RowWriterBuilder rowWriterBuilder = GeneratedRowWriter.newBuilder(readRecordsRequest.getConstraints());
                 
-                LOGGER.info("=== FIELD VALIDATION AND EXTRACTOR BUILDING ===");
-                LOGGER.info("Schema has {} fields to process", readRecordsRequest.getSchema().getFields().size());
+                LOGGER.debug("Building extractors for {} schema fields", readRecordsRequest.getSchema().getFields().size());
                 
                 // Build extractors for all fields, using null extractors for missing ones
                 for (Field next : readRecordsRequest.getSchema().getFields()) {
                     String fieldName = next.getName();
                     String lowerFieldName = fieldName.toLowerCase();
-                    LOGGER.info("Processing field: '{}' (lowercase: '{}'), checking if available...", fieldName, lowerFieldName);
                     
                     if (availableColumns.contains(lowerFieldName)) {
                         String actualColumnName = columnNameMapping.get(lowerFieldName);
-                        LOGGER.info("✓ Building extractor for available field: '{}' using actual column name: '{}'", fieldName, actualColumnName);
+                        LOGGER.debug("Building extractor for field '{}' using column '{}'", fieldName, actualColumnName);
                         if (next.getType() instanceof ArrowType.List) {
                             rowWriterBuilder.withFieldWriterFactory(next.getName(), makeFactory(next));
                         }
@@ -230,11 +224,11 @@ public abstract class JdbcRecordHandler
                         }
                     } else if (lowerFieldName.equals("partition_name") || lowerFieldName.startsWith("partition_")) {
                         // Add synthetic extractor for partition fields using partition values
-                        LOGGER.info("✓ Adding synthetic extractor for partition field: '{}'", fieldName);
+                        LOGGER.debug("Adding synthetic extractor for partition field '{}'", fieldName);
                         rowWriterBuilder.withExtractor(next.getName(), makeExtractor(next, resultSet, partitionValues));
                     } else {
                         // Add null extractor for missing fields
-                        LOGGER.info("✓ Adding null extractor for missing field: '{}'", fieldName);
+                        LOGGER.debug("Adding null extractor for missing field '{}'", fieldName);
                         rowWriterBuilder.withExtractor(next.getName(), makeNullExtractor(next));
                     }
                 }
@@ -245,26 +239,24 @@ public abstract class JdbcRecordHandler
                 
                 while (resultSet.next()) {
                     if (!queryStatusChecker.isQueryRunning()) {
-                        LOGGER.info("Query cancelled by status checker after {} rows", rowsReturnedFromDatabase);
+                        LOGGER.info("Query cancelled after processing {} rows", rowsReturnedFromDatabase);
                         return;
                     }
                     blockSpiller.writeRows((Block block, int rowNum) -> rowWriter.writeRow(block, rowNum, resultSet) ? 1 : 0);
                     rowsReturnedFromDatabase++;
                     
-                    // Log progress every 10000 rows
-                    if (rowsReturnedFromDatabase % 10000 == 0) {
-                        LOGGER.info("Processed {} rows so far", rowsReturnedFromDatabase);
+                    // Log progress every 50000 rows (reduced frequency)
+                    if (rowsReturnedFromDatabase % 50000 == 0) {
+                        LOGGER.info("Processed {} rows", rowsReturnedFromDatabase);
                     }
                 }
                 
                 long dataProcessingTime = System.currentTimeMillis() - dataProcessingStart;
                 long totalTime = System.currentTimeMillis() - startTime;
                 
-                LOGGER.info("=== JDBC RECORD HANDLER EXECUTION COMPLETE ===");
-                LOGGER.info("{} rows returned by database.", rowsReturnedFromDatabase);
-                LOGGER.info("Data processing time: {} ms", dataProcessingTime);
-                LOGGER.info("Total execution time: {} ms", totalTime);
-                LOGGER.info("Average rows per second: {}", rowsReturnedFromDatabase > 0 ? (rowsReturnedFromDatabase * 1000.0 / totalTime) : 0);
+                LOGGER.info("Query completed: {} rows processed in {} ms (avg {} rows/sec)", 
+                    rowsReturnedFromDatabase, totalTime, 
+                    rowsReturnedFromDatabase > 0 ? (rowsReturnedFromDatabase * 1000.0 / totalTime) : 0);
 
                 // clickhouse does not support commit/rollback, so skip commit() for clickhouse
                 if (!CLICKHOUSE_DB.equalsIgnoreCase(databaseProductName)) {

@@ -39,8 +39,12 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.calcite.sql.SqlDialect;
+import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlNode;
+import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlSelect;
+import org.apache.calcite.sql.SqlBasicCall;
+import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.dialect.AnsiSqlDialect;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,8 +61,10 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TimeZone;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -457,34 +463,86 @@ public abstract class JdbcSplitQueryBuilder
             String substraitSelectList = select.getSelectList().toSqlString(sqlDialect).getSql();
             LOGGER.info("Raw Substrait select list: {}", substraitSelectList);
             
-            // Extract just the column names without aliases by parsing the select list
-            String[] selectItems = substraitSelectList.split(",");
-            List<String> cleanColumnNames = new ArrayList<>();
+            // Use proper SQL parsing instead of string splitting to handle complex expressions
+            SqlNodeList selectList = select.getSelectList();
+            List<String> projectedColumns = new ArrayList<>();
+            Set<String> partitionColumns = new HashSet<>();
             
-            for (String item : selectItems) {
-                String trimmed = item.trim();
-                // Remove quotes and extract just the column name (before any alias)
-                String columnName;
-                if (trimmed.contains(" ")) {
-                    // Has alias, take the first part
-                    columnName = trimmed.split(" ")[0];
+            // Get actual partition columns from split properties (more accurate than hardcoded patterns)
+            if (split.getProperties() != null) {
+                for (String key : split.getProperties().keySet()) {
+                    partitionColumns.add(key.toLowerCase());
+                }
+            }
+            LOGGER.info("Actual partition columns from split: {}", partitionColumns);
+            
+            for (SqlNode selectItem : selectList) {
+                boolean shouldInclude = true;
+                String columnExpression = null;
+                
+                if (selectItem instanceof SqlIdentifier) {
+                    // Simple column reference: column_name
+                    SqlIdentifier identifier = (SqlIdentifier) selectItem;
+                    String columnName = identifier.getSimple().toLowerCase();
+                    
+                    // Skip partition columns that don't exist in actual database table
+                    if (partitionColumns.contains(columnName)) {
+                        LOGGER.info("Skipping partition column: {}", columnName);
+                        shouldInclude = false;
+                    } else {
+                        // Use clean column name without alias
+                        columnExpression = "\"" + identifier.getSimple() + "\"";
+                    }
+                } else if (selectItem instanceof SqlBasicCall && 
+                          ((SqlBasicCall) selectItem).getOperator().getKind() == SqlKind.AS) {
+                    // Handle aliased expressions: "column_name" AS "alias"
+                    SqlBasicCall asCall = (SqlBasicCall) selectItem;
+                    SqlNode sourceExpr = asCall.operand(0);
+                    
+                    if (sourceExpr instanceof SqlIdentifier) {
+                        SqlIdentifier sourceId = (SqlIdentifier) sourceExpr;
+                        String columnName = sourceId.getSimple().toLowerCase();
+                        
+                        // Skip partition columns
+                        if (partitionColumns.contains(columnName)) {
+                            LOGGER.info("Skipping aliased partition column: {}", columnName);
+                            shouldInclude = false;
+                        } else {
+                            // Use clean column name without alias for simple columns
+                            columnExpression = "\"" + sourceId.getSimple() + "\"";
+                        }
+                    } else {
+                        // Complex expression with alias - keep as is
+                        columnExpression = selectItem.toSqlString(sqlDialect).getSql();
+                    }
                 } else {
-                    // No alias, use as is
-                    columnName = trimmed;
+                    // Handle other complex expressions
+                    columnExpression = selectItem.toSqlString(sqlDialect).getSql();
+                    
+                    // Check if this is a partition column (even if aliased)
+                    for (String partitionCol : partitionColumns) {
+                        if (columnExpression.toLowerCase().contains("\"" + partitionCol.toLowerCase() + "\"") ||
+                            columnExpression.toLowerCase().contains(partitionCol.toLowerCase() + " ")) {
+                            LOGGER.info("Skipping partition column expression: {}", columnExpression);
+                            shouldInclude = false;
+                            break;
+                        }
+                    }
+                    
+                    if (shouldInclude) {
+                        LOGGER.info("Including complex expression: {}", columnExpression);
+                    }
                 }
                 
-                // Filter out partition columns that don't exist in the actual database table
-                String cleanColumnName = columnName.replace("\"", "").toLowerCase();
-                if (!cleanColumnName.equals("partition_name") && !cleanColumnName.startsWith("partition_")) {
-                    cleanColumnNames.add(columnName);
-                } else {
-                    LOGGER.info("Filtering out partition column: {}", columnName);
+                if (shouldInclude && columnExpression != null) {
+                    projectedColumns.add(columnExpression);
                 }
             }
             
-            String projectedColumns = String.join(", ", cleanColumnNames);
-            sql.append(projectedColumns);
-            LOGGER.info("Cleaned projected columns: {}", projectedColumns);
+            // Fallback: if no columns remain after filtering, use a constant to prevent empty SELECT
+            String finalProjection = projectedColumns.isEmpty() ? "1 AS dummy_column" : String.join(", ", projectedColumns);
+            sql.append(finalProjection);
+            LOGGER.info("Final projected columns: {}", finalProjection);
 
             String fromClause = getFromClauseWithSplit(catalog, schema, table, split);
             sql.append(fromClause);
