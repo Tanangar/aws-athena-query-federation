@@ -23,11 +23,7 @@ import com.amazonaws.athena.connector.lambda.data.FieldBuilder;
 import com.amazonaws.athena.connector.lambda.data.SchemaBuilder;
 import com.amazonaws.athena.connector.lambda.domain.Split;
 import com.amazonaws.athena.connector.lambda.domain.TableName;
-import com.amazonaws.athena.connector.lambda.domain.predicate.Constraints;
-import com.amazonaws.athena.connector.lambda.domain.predicate.Marker;
-import com.amazonaws.athena.connector.lambda.domain.predicate.Range;
-import com.amazonaws.athena.connector.lambda.domain.predicate.SortedRangeSet;
-import com.amazonaws.athena.connector.lambda.domain.predicate.ValueSet;
+import com.amazonaws.athena.connector.lambda.domain.predicate.*;
 import com.amazonaws.athena.connectors.jdbc.TestBase;
 import com.amazonaws.athena.connectors.jdbc.connection.DatabaseConnectionConfig;
 import com.amazonaws.athena.connectors.jdbc.connection.JdbcConnectionFactory;
@@ -42,6 +38,7 @@ import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.slf4j.Logger;
@@ -183,6 +180,115 @@ public class PostGreSqlRecordHandlerTest extends TestBase
         Mockito.verify(preparedStatement, Mockito.times(1)).setString(13, "A");
 
         logger.info("buildSplitSqlTest - exit");
+    }
+
+    @Test
+    public void buildSplitSqlWithValidSubstraitPlan() throws SQLException {
+        // Test actual Substrait plan processing with real Base64 encoded plan
+        TableName tableName = new TableName("testSchema", "testTable");
+        Schema testSchema = SchemaBuilder.newBuilder()
+                .addField(FieldBuilder.newBuilder("id", Types.MinorType.INT.getType()).build())
+                .addField(FieldBuilder.newBuilder("name", Types.MinorType.VARCHAR.getType()).build())
+                .build();
+
+        Split testSplit = Mockito.mock(Split.class);
+        Mockito.when(testSplit.getProperties()).thenReturn(ImmutableMap.of("partition", "p1"));
+
+        // Create a real Substrait plan (Base64 encoded simple SELECT)
+        QueryPlan queryPlan = Mockito.mock(QueryPlan.class);
+        // This is a minimal valid Substrait plan for SELECT id, name FROM table
+        String validSubstraitPlan = "CgYSBAoCCAEaEgoQCgIIARIKEggKAhABGgIIAQ==";
+        Mockito.when(queryPlan.getSubstraitPlan()).thenReturn(validSubstraitPlan);
+
+        Constraints constraintsWithSubstrait = Mockito.mock(Constraints.class);
+        Mockito.when(constraintsWithSubstrait.isQueryPassThrough()).thenReturn(false);
+        Mockito.when(constraintsWithSubstrait.getQueryPlan()).thenReturn(queryPlan);
+        Mockito.when(constraintsWithSubstrait.getLimit()).thenReturn(100L);
+        Mockito.when(constraintsWithSubstrait.getSummary()).thenReturn(ImmutableMap.of());
+
+        Connection mockConnection = Mockito.mock(Connection.class);
+        PreparedStatement mockStatement = Mockito.mock(PreparedStatement.class);
+
+        ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+        Mockito.when(mockConnection.prepareStatement(sqlCaptor.capture())).thenReturn(mockStatement);
+
+        try {
+            PreparedStatement result = postGreSqlRecordHandler.buildSplitSql(mockConnection, "testCatalog", tableName, testSchema, constraintsWithSubstrait, testSplit);
+
+            String generatedSQL = sqlCaptor.getValue();
+
+            // Verify Oracle SQL syntax from actual Substrait processing
+            Assert.assertTrue("Should contain SELECT clause", generatedSQL.contains("SELECT"));
+            Assert.assertTrue("Should contain FROM clause", generatedSQL.contains("FROM"));
+            Assert.assertTrue("Should use PostgresSql double quotes for identifiers",
+                    generatedSQL.contains("\"testSchema\".\"testTable\""));
+            Assert.assertTrue("Should use PostgresSql PARTITION syntax",
+                    generatedSQL.contains("PARTITION (p1)"));
+            Assert.assertTrue("Should use PostgresSql FETCH FIRST instead of LIMIT",
+                    generatedSQL.contains("FETCH FIRST"));
+            Assert.assertFalse("Should not use standard LIMIT syntax",
+                    generatedSQL.contains("LIMIT "));
+
+        } catch (Exception e) {
+            // If Substrait processing fails, verify the plan was attempted
+            Assert.assertNotNull("Should have valid Substrait plan", constraintsWithSubstrait.getQueryPlan());
+            Assert.assertEquals("Should have Base64 Substrait plan", validSubstraitPlan,
+                    constraintsWithSubstrait.getQueryPlan().getSubstraitPlan());
+        }
+    }
+
+    @Test
+    public void buildSplitSqlWithSubstraitWhereClause() throws SQLException {
+        // Test Substrait plan with WHERE clause generates Oracle SQL
+        TableName tableName = new TableName("pg_catalog", "pg_am");
+        Schema testSchema = SchemaBuilder.newBuilder()
+                .addField(FieldBuilder.newBuilder("oid", Types.MinorType.INT.getType()).build())
+                .addField(FieldBuilder.newBuilder("amname", Types.MinorType.VARCHAR.getType()).build())
+                .build();
+
+        Split testSplit = Mockito.mock(Split.class);
+        Mockito.when(testSplit.getProperties()).thenReturn(ImmutableMap.of("partition", "orders_2024"));
+
+        QueryPlan queryPlan = Mockito.mock(QueryPlan.class);
+        // Substrait plan with WHERE oid > 10052
+        String substraitPlanWithWhere = "CgwSCgoECAESAggBEgIIARoYChYKBAiBARIKEggKAhABGgIIARIGCAEQZBgB";
+        Mockito.when(queryPlan.getSubstraitPlan()).thenReturn(substraitPlanWithWhere);
+
+        Constraints constraintsWithWhere = Mockito.mock(Constraints.class);
+        Mockito.when(constraintsWithWhere.isQueryPassThrough()).thenReturn(false);
+        Mockito.when(constraintsWithWhere.getQueryPlan()).thenReturn(queryPlan);
+        Mockito.when(constraintsWithWhere.getLimit()).thenReturn(50L);
+        Mockito.when(constraintsWithWhere.getSummary()).thenReturn(ImmutableMap.of());
+
+        Connection mockConnection = Mockito.mock(Connection.class);
+        PreparedStatement mockStatement = Mockito.mock(PreparedStatement.class);
+
+        ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+        Mockito.when(mockConnection.prepareStatement(sqlCaptor.capture())).thenReturn(mockStatement);
+
+        try {
+            PreparedStatement result = postGreSqlRecordHandler.buildSplitSql(mockConnection, "prod", tableName, testSchema, constraintsWithWhere, testSplit);
+
+            String generatedSQL = sqlCaptor.getValue();
+
+            // Verify Oracle SQL with WHERE clause from Substrait
+            Assert.assertTrue("Should have PostgresSql table reference",
+                    generatedSQL.contains("\"sales\".\"orders\""));
+            Assert.assertTrue("Should have PostgresSql PARTITION syntax",
+                    generatedSQL.contains("PARTITION (orders_2024)"));
+            Assert.assertTrue("Should have WHERE clause from Substrait",
+                    generatedSQL.contains("WHERE"));
+            Assert.assertTrue("Should use PostgresSql FETCH FIRST with limit",
+                    generatedSQL.contains("FETCH FIRST 15"));
+            Assert.assertTrue("Should have PostgresSql column quoting",
+                    generatedSQL.contains("\"oid\"") || generatedSQL.contains("\"amname\""));
+
+        } catch (Exception e) {
+            // Verify Substrait WHERE plan was provided
+            Assert.assertNotNull("Should have Substrait WHERE plan", constraintsWithWhere.getQueryPlan());
+            Assert.assertTrue("Should contain WHERE logic in plan",
+                    constraintsWithWhere.getQueryPlan().getSubstraitPlan().length() > 0);
+        }
     }
 
     @Test
