@@ -78,7 +78,7 @@ public class PostGreSqlRecordHandler
 
     @VisibleForTesting
     protected PostGreSqlRecordHandler(DatabaseConnectionConfig databaseConnectionConfig, S3Client amazonS3, SecretsManagerClient secretsManager,
-            AthenaClient athena, JdbcConnectionFactory jdbcConnectionFactory, JdbcSplitQueryBuilder jdbcSplitQueryBuilder, java.util.Map<String, String> configOptions)
+                                      AthenaClient athena, JdbcConnectionFactory jdbcConnectionFactory, JdbcSplitQueryBuilder jdbcSplitQueryBuilder, java.util.Map<String, String> configOptions)
     {
         super(amazonS3, secretsManager, athena, databaseConnectionConfig, jdbcConnectionFactory, configOptions);
         this.jdbcSplitQueryBuilder = Validate.notNull(jdbcSplitQueryBuilder, "query builder must not be null");
@@ -87,21 +87,48 @@ public class PostGreSqlRecordHandler
     @Override
     public PreparedStatement buildSplitSql(Connection jdbcConnection, String catalogName, TableName tableName, Schema schema, Constraints constraints, Split split)
     {
+        LOGGER.info("=== PostGre QUERY EXECUTION DETAILS ===");
+        LOGGER.info("Catalog: {}, Schema: {}, Table: {}", catalogName, tableName.getSchemaName(), tableName.getTableName());
+        LOGGER.info("Split properties: {}", split.getProperties());
+        LOGGER.info("Schema fields: {}", schema.getFields().stream().map(f -> f.getName() + ":" + f.getType()).collect(java.util.stream.Collectors.toList()));
+
+        // Log constraint details
+        LOGGER.info("Constraints summary: {}", constraints.getSummary());
+        LOGGER.info("Query pass-through: {}", constraints.isQueryPassThrough());
+        LOGGER.info("Has query plan (Substrait): {}", constraints.getQueryPlan() != null);
+        LOGGER.info("Limit: {}", constraints.getLimit());
+
+        if (constraints.getQueryPlan() != null) {
+            LOGGER.info("=== SUBSTRAIT QUERY PLAN DETECTED ===");
+            LOGGER.info("Query plan length: {} bytes", constraints.getQueryPlan().getSubstraitPlan().length());
+        } else {
+            LOGGER.info("=== TRADITIONAL CONSTRAINTS PROCESSING ===");
+            constraints.getSummary().forEach((column, summary) ->
+                    LOGGER.info("Column '{}' constraints: {}", column, summary));
+        }
         PreparedStatement preparedStatement;
         try {
             if (constraints.isQueryPassThrough()) {
+                LOGGER.info("Using query pass-through mode");
                 preparedStatement = buildQueryPassthroughSql(jdbcConnection, constraints);
             }
             else {
+                LOGGER.info("Building SQL using JdbcSplitQueryBuilder");
                 preparedStatement = jdbcSplitQueryBuilder.buildSql(jdbcConnection, null, tableName.getSchemaName(), tableName.getTableName(), schema, constraints, split);
             }
+            // Log final prepared statement
+            LOGGER.info("=== FINAL PREPARED STATEMENT ===");
+            LOGGER.info("Final prepared statement SQL: {}", preparedStatement.toString());
+
             // Disable fetching all rows.
             preparedStatement.setFetchSize(FETCH_SIZE);
+            LOGGER.info("Set fetch size to: {}", FETCH_SIZE);
         }
+
         catch (SQLException e) {
             throw new AthenaConnectorException(e.getMessage(), ErrorDetails.builder().errorCode(FederationSourceErrorCode.INTERNAL_SERVICE_EXCEPTION.toString()).build());
         }
-
+        LOGGER.info("Final prepared statement SQL: {}", preparedStatement);
         return preparedStatement;
     }
 }

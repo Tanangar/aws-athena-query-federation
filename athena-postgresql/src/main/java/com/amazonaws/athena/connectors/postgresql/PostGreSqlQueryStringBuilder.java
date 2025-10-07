@@ -1,6 +1,6 @@
-/*- 
- * #%L 
- * athena-postgresql 
+/*-
+ * #%L
+ * athena-postgresql
  * %%
  * Copyright (C) 2019 Amazon Web Services
  * %%
@@ -25,6 +25,8 @@ import com.amazonaws.athena.connectors.jdbc.manager.FederationExpressionParser;
 import com.amazonaws.athena.connectors.jdbc.manager.JdbcSplitQueryBuilder;
 import com.google.common.base.Strings;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.calcite.sql.SqlDialect;
+import org.apache.calcite.sql.dialect.PostgresqlSqlDialect;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -113,4 +115,20 @@ public class PostGreSqlQueryStringBuilder
 
         return Collections.emptyList();
     }
+
+    @Override
+    protected SqlDialect getSqlDialect()
+    {
+        return PostgresqlSqlDialect.DEFAULT;
+    }
+
+    @Override
+    protected String appendLimitOffsetWithValue(String limit, String offset)
+    {
+        if (offset != null && !offset.equals("0")) {
+            return String.format(" OFFSET %s ROWS FETCH FIRST %s ROWS ONLY", offset, limit);
+        }
+        return String.format(" FETCH FIRST %s ROWS ONLY", limit);
+    }
+
 }
