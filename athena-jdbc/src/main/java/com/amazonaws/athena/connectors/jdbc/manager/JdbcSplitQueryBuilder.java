@@ -182,6 +182,7 @@ public abstract class JdbcSplitQueryBuilder
         LOGGER.info("=== FINAL GENERATED SQL ===");
         LOGGER.info("Final SQL query: {}", sql.toString());
         PreparedStatement statement = jdbcConnection.prepareStatement(sql.toString());
+        LOGGER.info("Prepared Statement : {}", statement);
         // TODO all types, converts Arrow values to JDBC.
         for (int i = 0; i < accumulator.size(); i++) {
             TypeAndValue typeAndValue = accumulator.get(i);
