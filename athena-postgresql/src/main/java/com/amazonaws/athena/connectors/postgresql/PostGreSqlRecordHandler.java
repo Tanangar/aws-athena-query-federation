@@ -109,7 +109,8 @@ public class PostGreSqlRecordHandler
             throw new AthenaConnectorException(e.getMessage(), ErrorDetails.builder().errorCode(FederationSourceErrorCode.INTERNAL_SERVICE_EXCEPTION.toString()).build());
         }
         long buildTime = System.currentTimeMillis() - startTime;
-        LOGGER.info("Oracle SQL build completed in {} ms with fetch size: {}", buildTime, FETCH_SIZE);
+        LOGGER.info("PostgresSQL-  SQL build completed in {} ms with fetch size: {}", buildTime, FETCH_SIZE);
+        LOGGER.info("Prepare Statement ----- "+preparedStatement);
         return preparedStatement;
     }
 }
