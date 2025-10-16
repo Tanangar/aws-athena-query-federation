@@ -32,6 +32,8 @@ import com.amazonaws.athena.connectors.jdbc.manager.JdbcSplitQueryBuilder;
 import com.google.common.annotations.VisibleForTesting;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.commons.lang3.Validate;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.athena.AthenaClient;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
@@ -44,6 +46,7 @@ import static com.amazonaws.athena.connectors.sqlserver.SqlServerConstants.SQLSE
 
 public class SqlServerRecordHandler extends JdbcRecordHandler
 {
+    private static final Logger LOGGER = LoggerFactory.getLogger(SqlServerRecordHandler.class);
     private static final int FETCH_SIZE = 1000;
     private final JdbcSplitQueryBuilder jdbcSplitQueryBuilder;
 
@@ -76,17 +79,27 @@ public class SqlServerRecordHandler extends JdbcRecordHandler
     public PreparedStatement buildSplitSql(Connection jdbcConnection, String catalogName, TableName tableName, Schema schema, Constraints constraints,
                                            Split split) throws SQLException
     {
+        LOGGER.info("=== SQLServer RECORD HANDLER ===");
+        LOGGER.info("Building SQL for table: {}.{}", tableName.getSchemaName(), tableName.getTableName());
+        LOGGER.info("Query passThrough: {}", constraints.isQueryPassThrough());
+
+        long startTime = System.currentTimeMillis();
         PreparedStatement preparedStatement;
 
         if (constraints.isQueryPassThrough()) {
+            LOGGER.info("Using Query passThrough approach");
             preparedStatement = buildQueryPassthroughSql(jdbcConnection, constraints);
         }
         else {
+            LOGGER.info("Using SQLServer JDBC split query builder");
             preparedStatement = jdbcSplitQueryBuilder.buildSql(jdbcConnection, null, tableName.getSchemaName(), tableName.getTableName(),
                     schema, constraints, split);
         }
         // Disable fetching all rows.
         preparedStatement.setFetchSize(FETCH_SIZE);
+        long buildTime = System.currentTimeMillis() - startTime;
+        LOGGER.info("SQLServer-  SQL build completed in {} ms with fetch size: {}", buildTime, FETCH_SIZE);
+        LOGGER.info("Prepare Statement ----- "+preparedStatement);
         return preparedStatement;
     }
 }

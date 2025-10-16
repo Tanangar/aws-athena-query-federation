@@ -43,6 +43,8 @@ public class SqlServerQueryStringBuilder extends JdbcSplitQueryBuilder
     @Override
     protected String getFromClauseWithSplit(String catalog, String schema, String table, Split split)
     {
+        LOGGER.info("=== SQLServer FROM CLAUSE GENERATION ===");
+        LOGGER.info("Building FROM clause for table: {}.{}.{}", catalog, schema, table);
         StringBuilder tableName = new StringBuilder();
         if (!Strings.isNullOrEmpty(catalog)) {
             tableName.append(quote(catalog)).append('.');
@@ -51,7 +53,9 @@ public class SqlServerQueryStringBuilder extends JdbcSplitQueryBuilder
             tableName.append(quote(schema)).append('.');
         }
         tableName.append(quote(table));
-        return String.format(" FROM %s ", tableName);
+        String fromClause = String.format(" FROM %s ", tableName);
+        LOGGER.info("SQLServer FROM clause (no partitions): {}", fromClause);
+        return fromClause;
     }
 
     /**

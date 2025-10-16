@@ -25,8 +25,6 @@ import com.amazonaws.athena.connectors.jdbc.manager.FederationExpressionParser;
 import com.amazonaws.athena.connectors.jdbc.manager.JdbcSplitQueryBuilder;
 import com.google.common.base.Strings;
 import org.apache.arrow.vector.types.pojo.Schema;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -44,7 +42,6 @@ import java.util.stream.Collectors;
 public class PostGreSqlQueryStringBuilder
         extends JdbcSplitQueryBuilder
 {
-    private static final Logger LOGGER = LoggerFactory.getLogger(PostGreSqlQueryStringBuilder.class);
     public PostGreSqlQueryStringBuilder(final String quoteCharacters, final FederationExpressionParser federationExpressionParser)
     {
         super(quoteCharacters, federationExpressionParser);
@@ -86,8 +83,6 @@ public class PostGreSqlQueryStringBuilder
     @Override
     protected String getFromClauseWithSplit(String catalog, String schema, String table, Split split)
     {
-        LOGGER.info("=== POSTGRES_SQL FROM CLAUSE GENERATION ===");
-        LOGGER.info("Building FROM clause for table: {}.{}.{}", catalog, schema, table);
         StringBuilder tableName = new StringBuilder();
         if (!Strings.isNullOrEmpty(catalog)) {
             tableName.append(quote(catalog)).append('.');
@@ -99,18 +94,13 @@ public class PostGreSqlQueryStringBuilder
 
         String partitionSchemaName = split.getProperty(PostGreSqlMetadataHandler.BLOCK_PARTITION_SCHEMA_COLUMN_NAME);
         String partitionName = split.getProperty(PostGreSqlMetadataHandler.BLOCK_PARTITION_COLUMN_NAME);
-        LOGGER.info("Partition Schema name from split: {}", partitionSchemaName);
-        LOGGER.info("Partition name from split: {}", partitionName);
 
         if (PostGreSqlMetadataHandler.ALL_PARTITIONS.equals(partitionSchemaName) || PostGreSqlMetadataHandler.ALL_PARTITIONS.equals(partitionName)) {
             // No partitions
-            String fromClause = String.format(" FROM %s ", tableName);
-            LOGGER.info("PostgresSQL FROM clause (no partitions): {}", fromClause);
-            return fromClause;
+            return String.format(" FROM %s ", tableName);
         }
-        String fromClause = String.format(" FROM %s.%s ", quote(partitionSchemaName), quote(partitionName));
-        LOGGER.info("PostgresSQL FROM clause (with partition): {}", fromClause);
-        return fromClause;
+
+        return String.format(" FROM %s.%s ", quote(partitionSchemaName), quote(partitionName));
     }
 
     @Override

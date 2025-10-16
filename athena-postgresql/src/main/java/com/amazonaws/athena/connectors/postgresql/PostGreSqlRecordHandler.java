@@ -87,19 +87,12 @@ public class PostGreSqlRecordHandler
     @Override
     public PreparedStatement buildSplitSql(Connection jdbcConnection, String catalogName, TableName tableName, Schema schema, Constraints constraints, Split split)
     {
-        LOGGER.info("=== POSTGRES_SQL RECORD HANDLER ===");
-        LOGGER.info("Building SQL for table: {}.{}", tableName.getSchemaName(), tableName.getTableName());
-        LOGGER.info("Query passThrough: {}", constraints.isQueryPassThrough());
-
-        long startTime = System.currentTimeMillis();
         PreparedStatement preparedStatement;
         try {
             if (constraints.isQueryPassThrough()) {
-                LOGGER.info("Using Query passThrough approach");
                 preparedStatement = buildQueryPassthroughSql(jdbcConnection, constraints);
             }
             else {
-                LOGGER.info("Using PostgresSQL JDBC split query builder");
                 preparedStatement = jdbcSplitQueryBuilder.buildSql(jdbcConnection, null, tableName.getSchemaName(), tableName.getTableName(), schema, constraints, split);
             }
             // Disable fetching all rows.
@@ -108,9 +101,7 @@ public class PostGreSqlRecordHandler
         catch (SQLException e) {
             throw new AthenaConnectorException(e.getMessage(), ErrorDetails.builder().errorCode(FederationSourceErrorCode.INTERNAL_SERVICE_EXCEPTION.toString()).build());
         }
-        long buildTime = System.currentTimeMillis() - startTime;
-        LOGGER.info("PostgresSQL-  SQL build completed in {} ms with fetch size: {}", buildTime, FETCH_SIZE);
-        LOGGER.info("Prepare Statement ----- "+preparedStatement);
+
         return preparedStatement;
     }
 }
